@@ -5,10 +5,10 @@
 #include <Wire.h>
 #include <VL53L1X.h>
 
-// #define THRUST1 A0
-// #define THRUST2 A1
-#define THRUST1 A2
-#define THRUST2 A3
+#define THRUST1 A0
+#define THRUST2 A1
+// #define THRUST1 A2
+// #define THRUST2 A3
 
 VL53L1X sensor;
 
@@ -37,9 +37,9 @@ float roll, pitch, yaw;
 float rollrate, pitchrate, yawrate;
 float estimatedZ, velocityZ, groundZ;
 float abz = 0.0;
-float kpz = 0.01*3.0; // N/meter
-float kiz = 0.02;
-float kdz = 0.2*1.0;
+float kpz = 0.08; // N/meter
+float kiz = 0.002;
+float kdz = 0.005;
 float kpx = 0.035;
 float kdx = 0.2;
 float kptz = 0.3;
@@ -49,11 +49,33 @@ float kdtx = 0.01;
 float lx = 0.25;
 float m1 = 0.0;
 float m2 = 0.0;
-float heading = 0.0;
-float massthrust = 0.9;
+// float heading = 0.0;
+float massthrust = 0.3;
 long dt, last_time, time_nw;
+
 float wall = 0.0;
-float kwall = 5.0;
+float kwall = 0.02;
+float last_time_flip = 0.0;
+
+float forcex = 0.3;
+// float forcey = 0.001*random(-100, 100);
+float forcey = 0.3;
+float walk_heading  = atan2(forcey,forcex);
+float joymag = sqrt(pow(forcex,2) + pow(forcey,2));
+float random_reflect = 0;
+float wall_min = 1500;
+float yaw_min_dist = 0;
+
+int wall_detect;
+int wall_truly_short;
+
+bool random_trip = false;
+
+
+
+// float timedif;
+// float timest = 0;
+// float timeend = 0;
 
 void setup() {
   Serial.begin(9600); 
@@ -125,7 +147,7 @@ void setup() {
   }
 
   // Yaw heading setup
-  heading = sensorSuite.getYaw(); 
+  // heading = sensorSuite.getYaw(); 
 
   // Time of flight sensors setup
   Wire.begin();
@@ -158,6 +180,9 @@ void loop() {
     // thrust2.writeMicroseconds(minUs);
     analogWrite(THRUST1, (int) minUs);
     analogWrite(THRUST2, (int) minUs);
+    
+    wall = sensor.read();
+    // Serial.println(wall);
 
     // Debug joystick input
     // thrust1.writeMicroseconds((int) (1000 + joy_data[0]));
@@ -192,7 +217,7 @@ void loop() {
     // thrust2.write((int) m2us);
     analogWrite(THRUST1, (int) m1us);
     analogWrite(THRUST2, (int) m2us);
-    // Serial.print("m1us");
+    // Serial.print("m1us: ");
     // Serial.println((int) m1us);
 
     // Else statement for if the Wi-Fi signal is lost
@@ -242,6 +267,7 @@ void getSensorValues(){
   // roll = sensorSuite.getRoll();
   // pitch = -1*sensorSuite.getPitch();
   yaw = sensorSuite.getYaw();
+  Serial.println(yaw);
   // rollrate = sensorSuite.getRollRate();
   // pitchrate = sensorSuite.getPitchRate();
   yawrate = sensorSuite.getYawRate();
@@ -276,15 +302,15 @@ void getControllerInputs(float *fx, float *fy, float *fz, float *tx, float *ty, 
 }
 void addFeedback(float *fx, float *fy, float *fz, float *tx, float *ty, float *tz, float abz){
     // *fz = 0;
-    float err = estimatedZ-groundZ;
+    // float err = estimatedZ-groundZ;
     delta_time();
-    float int_err =+ dt * err;
+    // float int_err =+ dt * err;
     // *fz = (*fz  - (estimatedZ-groundZ))*kpz - (int_err * kiz) - (velocityZ)*kdz + abz;//*fz = *fz + abz;//
-    *fz = (*fz  - (*tz))*kpz - (velocityZ)*kdz + abz;//*fz = *fz + abz;//
-    Serial.print(estimatedZ);
-    Serial.println(*tz);
-    // *fz = (*fz  - (estimatedZ-groundZ))*kpz - (velocityZ)*kdz + abz;//*fz = *fz + abz;//
-
+    // *fz = (*fz  - (*tz))*kpz - (velocityZ)*kdz + abz;//*fz = *fz + abz;//
+    // Serial.print(estimatedZ);
+    // Serial.println(*tz);
+    *fz = (*fz  - (estimatedZ-groundZ))*kpz - (velocityZ)*kdz + abz;//*fz = *fz + abz;//
+    // *fz = *fz + *tz;
   // Serial.println(int_err*kiz);
 }
 
@@ -306,47 +332,96 @@ float clamp(float in, float min, float max){
 }
 
 void controlOutputs(float ifx, float ify, float ifz, float itx, float ity, float itz) {
+  // Define boundary for flipping fx-direction
+  int distance = 1400;
+  //yaw = ity;
 
-  // // Heading added to the control loop
-  // heading = heading + radians(ity * 180);
-  
-  // Serial.println(yaw);
 
   // Convert joystick input to theta and magnitude for cyclic input
-  float joytheta = atan2(ify,-ifx) + PI;  
-  float joymag  = sqrt(pow(ifx,2) + pow(ify,2));
-  // yaw = ity;
+  // float joytheta = atan2(ify,-ifx) + PI;  
+
+  // Flipping fx-direction based on time since fx was last flipped
+  if ((time_nw - last_time_flip)>6000.0){
+    wall = sensor.read();
+    
+    if (random_trip == true){
+      walk_heading = walk_heading + (PI*0.0025 * random(-25,25));
+      random_trip = false;
+    }
+    // create a variable that always keeps the min wall distance
+    // store yaw value at the min wall distance
+
+    if (wall<distance) {
+      wall_detect ++;
+      if (wall_min > wall){
+        wall_min = wall;
+        yaw_min_dist = yaw;
+      }
+
+      if (wall_detect > 3){
+        joymag = 0;
+
+        if (wall>wall_min){
+          wall_truly_short ++;
+        }
+
+        if (wall_truly_short > 2){
+          // walk_heading = walk_heading + 2.0*(1.57 - (walk_heading - yaw_min_dist)); // 
+          walk_heading = -yaw_min_dist;
+
+          // if (walk_heading > PI){
+          //   walk_heading = walk_heading - 2*PI;
+          // } else{if (walk_heading < -1.0*PI){
+          //   walk_heading = walk_heading + 2*PI;
+          // }
+          // }
+
+          // forcex = -1.0 * forcex;
+          // forcey = -1.0 * forcey;
+          last_time_flip = time_nw;
+          wall_detect = 0;
+          wall_truly_short = 0;
+          joymag = sqrt(pow(forcex,2) + pow(forcey,2));
+          wall_min = 1500;
+          random_trip = true;
+        }
+      }
+    }else{if(wall_detect > 0){wall_detect --;}}
+  }
+  send_udp_feedback(wall,wall_min,estimatedZ,groundZ);
+  // float joymag  = sqrt(pow(forcex,2) + pow(forcey,2));
+
   // Cyclic pitch input
   // float lhs = joymag*(coscos  - sincos);
   // float rhs = joymag*(-sincos - coscos);
 
-  float pitch = joymag * sin(joytheta) * cos(yaw);
-  float roll =  joymag * cos(joytheta) * sin(yaw);
-  // float pitch = joymag * sin(joytheta) * cos(yaw + heading);
-  // float roll =  joymag * cos(joytheta) * sin(yaw + heading);
+  float pitch = joymag * sin(walk_heading) * cos(yaw);
+  float roll =  joymag * cos(walk_heading) * sin(yaw);
+
 
   // TODO: bring back x-y feedback
   // Mass Thrust it a proportional debug gain
   float mt = massthrust;
   float f1 = 0;
   float f2 = 0;
-  wall = sensor.read();
-  Serial.println(wall);
-  if (wall<500) {
-    f1 = ifz + (mt * (pitch + roll)); // LHS motor
-    f2 = ifz - (mt * (pitch + roll)) + kwall*(1/wall); // RHS motor
-  } else{
-    f1 = ifz + (mt * (pitch + roll)); // LHS motor
-    f2 = ifz - (mt * (pitch + roll)); // RHS motor
-  }
 
+  // if (wall<distance) {
+  //   f1 = ifz + (mt * (pitch + roll)) - 0.0*kwall*(distance-wall); // LHS motor
+  //   f2 = ifz - (mt * (pitch + roll)) + kwall*(distance-wall); // RHS motor
+  //   ifx = ifx*-1.0;
+  //   sleep(2);
+  // } else{
+  //   f1 = ifz + (mt * (pitch + roll)); // LHS motor
+  //   f2 = ifz - (mt * (pitch + roll)); // RHS motor
+  // }
+  f1 = ifz + (mt * (pitch + roll)); // LHS motor
+  f2 = ifz - (mt * (pitch + roll));
 
   // Clamp to ensure motor doesn't stop spinning at minimum
   // and motor doesn't draw too much current
-  m1 = clamp(f1, 0.05, 0.25*2.0);
-  m2 = clamp(f2, 0.05, 0.25*2.0);
+  m1 = clamp(f1, 0.02, 0.25*2.0);
+  m2 = clamp(f2, 0.02, 0.25*2.0);
   // Serial.println(m1);
-
   // m1 = clamp(f1, 0.03, 0.19);
   // m2 = clamp(f2, 0.03, 0.19);
 
@@ -367,4 +442,23 @@ void unpack_joystick(float *dat, const unsigned char *buffer) {
 
   }
 ;
+}
+
+// Optional UDP feeback section
+// ----------------------------
+
+// This function converts floats to strings and concatenates the strings for broadcastTo func
+void send_udp_feedback(int wall, float wall_min, float walk_heading, float yaw_min_dist){
+
+  String motor1 = String(wall);
+  String motor2 = String(wall_min);
+  String motor3 = String(walk_heading);
+  String motor4 = String(yaw_min_dist);
+  String comb = String("");
+  String comma = String(", ");
+  String semicol = String(";");
+  comb = motor1 + comma + motor2 + comma + motor3 + comma + motor4 + semicol;
+  // UDP Broadcast (string,port)
+  udp.broadcastTo(comb.c_str(),8003);
+// udp.broadcastTo("I Work",8001);
 }
